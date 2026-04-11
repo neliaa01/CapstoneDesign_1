@@ -2,11 +2,11 @@
 #include "camera_test.h"
 
 void setup() {
-    performanceSetup();
+    cameraSetup();
 }
 
 void loop() {
-    performanceLoop();
+    cameraLoop();
 }
 
 // #include <Arduino.h>

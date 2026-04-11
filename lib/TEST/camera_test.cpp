@@ -5,8 +5,8 @@
 #include <Arduino.h>
 
 // ===== 와이파이 =====
-const char* ssid = "YOUR_WIFI";
-const char* password = "YOUR_PASSWORD";
+const char* ssid = "iPhone (4)";
+const char* password = "01290129";
 
 // ===== 카메라 핀 =====
 #define PWDN_GPIO_NUM     -1
