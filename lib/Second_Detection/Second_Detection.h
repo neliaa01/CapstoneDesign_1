@@ -1,8 +1,6 @@
-#ifndef SECOND_DETECTION_H
-#define SECOND_DETECTION_H
+#pragma once
+#include "esp_camera.h"
 
-#include <Arduino.h>
-
-float analyzeDataPrecision(uint8_t* img_on, uint8_t* img_off, int w, int h, float temp);
-
-#endif
+namespace Second_Detection {
+    float refine(camera_fb_t* image, float thermal);
+}

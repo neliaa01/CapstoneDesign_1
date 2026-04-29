@@ -1,54 +1,64 @@
-#include "performance_test.h"
-#include "camera_test.h"
+#include <Arduino.h>
+#include "Sensors.h"
+#include "LED.h"
+#include "Comm.h"
+
+// ===== 핀 =====
+#define PIN_BUTTON 0
+#define PIN_IR_LED 10
+
+void captureAndSend();
+
+bool lastButtonState = HIGH;
+bool currentButtonState = HIGH;
 
 void setup() {
-    cameraSetup();
+    Serial.begin(115200);
+
+    pinMode(PIN_BUTTON, INPUT_PULLUP);
+    pinMode(PIN_IR_LED, OUTPUT);
+    digitalWrite(PIN_IR_LED, LOW);
+
+    Sensors::begin();
+    LED::begin();
+    Comm::begin();
+
+    LED::off();
 }
 
 void loop() {
-    cameraLoop();
+    currentButtonState = digitalRead(PIN_BUTTON);
+
+    if (lastButtonState == HIGH && currentButtonState == LOW) {
+        captureAndSend();
+    }
+
+    lastButtonState = currentButtonState;
+
+    Comm::handleClient(); // 웹 접속 처리
 }
 
-// #include <Arduino.h>
 
+// ===== 핵심 동작 =====
+void captureAndSend() {
+    LED::scanning();
 
-// #include "Sensors.h"
-// #include "First_Detection.h"
-// #include "Second_Detection.h"
-// #include "Comm.h"
-// #include "LED.h"
+    digitalWrite(PIN_IR_LED, HIGH);
+    delay(200);
 
-// // 핀 정의
-// #define BUTTON_PIN 2
+    camera_fb_t* frame = Sensors::captureImage();
 
-// // 상태 정의
-// enum State {
-//     IDLE,
-//     SCANNING,
-//     ANALYZING,
-//     RESULT,
-//     PRECISION_SCAN
-// };
+    digitalWrite(PIN_IR_LED, LOW);
 
-// State currentState = IDLE;
+    if (frame == NULL) {
+        LED::error();
+        return;
+    }
 
-// // 결과 변수
-// float detectionScore = 0.0;
-// bool suspiciousDetected = false;
+    
+    Comm::setFrame(frame);  // 전송용 저장
 
-// // 버튼 상태
-// bool lastButtonState = LOW;
-
-// void setup() {
-//     Serial.begin(115200);
-
-//     pinMode(BUTTON_PIN, INPUT);
-
-//     initSensors();
-//     initLED();
-//     initComm();
-//     setLEDIdle();
-// }
-
-// void loop() {
-// }
+    LED::success();
+    delay(1500);
+    LED::off();
+}

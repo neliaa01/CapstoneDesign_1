@@ -1,9 +1,6 @@
-#ifndef FIRST_DETECTION_H
-#define FIRST_DETECTION_H
+#pragma once
+#include "esp_camera.h"
 
-#include <Arduino.h>
-
-
-float analyzeData(uint8_t* img_on, uint8_t* img_off, int w, int h, float temp);
-
-#endif
+namespace First_Detection {
+    float detect(camera_fb_t* image);
+}
