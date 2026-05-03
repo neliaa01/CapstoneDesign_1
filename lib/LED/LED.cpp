@@ -1,9 +1,9 @@
 #include <Arduino.h>
 #include "LED.h"
 
-#define R_PIN 7
-#define G_PIN 8
-#define B_PIN 9
+#define R_PIN 44
+#define G_PIN 7
+#define B_PIN 8
 
 void LED::begin() {
     pinMode(R_PIN, OUTPUT);

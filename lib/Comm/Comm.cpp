@@ -1,5 +1,5 @@
 #include "Comm.h"
-
+#include <Arduino.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -9,12 +9,13 @@
 // OwlGuard BLE UUID
 // Android 앱 코드와 반드시 동일해야 함
 // ===============================
-#define OWL_SERVICE_UUID        "8b7f0001-2f3a-4a6d-9b7a-0a1b2c3d0001"
-#define STATUS_CHAR_UUID        "8b7f0003-2f3a-4a6d-9b7a-0a1b2c3d0003"
-#define IMAGE_META_CHAR_UUID    "8b7f0004-2f3a-4a6d-9b7a-0a1b2c3d0004"
-#define IMAGE_DATA_CHAR_UUID    "8b7f0005-2f3a-4a6d-9b7a-0a1b2c3d0005"
+#define OWL_SERVICE_UUID        "d10045a3-16e8-41cb-a720-19f9f20dce98"
+#define STATUS_CHAR_UUID        "19758804-2826-41ab-ae18-63d9e11807e1"
+#define IMAGE_META_CHAR_UUID    "6c6869ee-9392-4425-bd02-c5d2aeb026ee"
+#define IMAGE_DATA_CHAR_UUID    "50c63f63-af08-4ebb-8738-7fc09fc8d713"
 
-// BLE 전송 chunk 크기
+// BLE 전송 chunk 크기2]\\\\\
+    
 // Android 앱에서 MTU 517 요청을 전제로 180 bytes 사용
 static const size_t CHUNK_SIZE = 180;
 static const unsigned long SEND_INTERVAL_MS = 10;
@@ -69,7 +70,6 @@ void begin() {
 
     BLEService* service = bleServer->createService(OWL_SERVICE_UUID);
 
-    // 상태 전송용 characteristic
     statusChar = service->createCharacteristic(
         STATUS_CHAR_UUID,
         BLECharacteristic::PROPERTY_READ |
@@ -78,14 +78,12 @@ void begin() {
     statusChar->addDescriptor(new BLE2902());
     statusChar->setValue("READY");
 
-    // 이미지 메타데이터 전송용 characteristic
     imageMetaChar = service->createCharacteristic(
         IMAGE_META_CHAR_UUID,
         BLECharacteristic::PROPERTY_NOTIFY
     );
     imageMetaChar->addDescriptor(new BLE2902());
 
-    // 이미지 데이터 chunk 전송용 characteristic
     imageDataChar = service->createCharacteristic(
         IMAGE_DATA_CHAR_UUID,
         BLECharacteristic::PROPERTY_NOTIFY
@@ -96,11 +94,13 @@ void begin() {
 
     BLEAdvertising* advertising = BLEDevice::getAdvertising();
     advertising->addServiceUUID(OWL_SERVICE_UUID);
-    advertising->setScanResponse(true);
-
-    BLEDevice::startAdvertising();
+    advertising->setScanResponse(false);
+    advertising->start();
 
     Serial.println("[Comm] BLE advertising started: OwlGuard");
+    delay(500);
+    Serial.println("[Comm] BLE begin done");
+    delay(500);
 }
 
 bool isConnected() {
