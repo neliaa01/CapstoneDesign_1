@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include "LED.h"
 
-#define R_PIN 44
+#define R_PIN 4
 #define G_PIN 7
 #define B_PIN 8
 
