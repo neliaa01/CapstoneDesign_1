@@ -2,320 +2,383 @@
 
 #include <Arduino.h>
 #include <BLEDevice.h>
-#include <BLEServer.h>
 #include <BLEUtils.h>
+#include <BLEServer.h>
 #include <BLE2902.h>
+#include "esp_camera.h"
 
-namespace Comm {
-
+// ===============================
+// OwlGuard BLE UUID
+// Android 앱 코드와 반드시 동일해야 함
+// ===============================
 #define OWL_SERVICE_UUID        "d10045a3-16e8-41cb-a720-19f9f20dce98"
+
 #define STATUS_CHAR_UUID        "19758804-2826-41ab-ae18-63d9e11807e1"
+
 #define IMAGE_META_CHAR_UUID    "6c6869ee-9392-4425-bd02-c5d2aeb026ee"
 #define IMAGE_DATA_CHAR_UUID    "50c63f63-af08-4ebb-8738-7fc09fc8d713"
 
+// 새로 추가한 열화상 BLE Characteristic UUID
 #define THERMAL_META_CHAR_UUID  "f9ee6d11-9076-49a6-9976-008123c87bd3"
 #define THERMAL_DATA_CHAR_UUID  "79dc4891-2ce8-4e9a-af50-77550f0f2274"
 
-static BLEServer* bleServer = nullptr;
-static BLEService* owlService = nullptr;
+static const size_t CHUNK_SIZE = 180;
+static const unsigned long SEND_INTERVAL_MS = 10;
 
+// BLE 객체
+static BLEServer* bleServer = nullptr;
 static BLECharacteristic* statusChar = nullptr;
+
 static BLECharacteristic* imageMetaChar = nullptr;
 static BLECharacteristic* imageDataChar = nullptr;
 
 static BLECharacteristic* thermalMetaChar = nullptr;
 static BLECharacteristic* thermalDataChar = nullptr;
 
+// 연결 상태
 static bool deviceConnected = false;
 
-static const size_t IMAGE_CHUNK_SIZE = 180;
-static const size_t THERMAL_CHUNK_SIZE = 180;
+// 이미지 전송 버퍼
+static uint8_t* frameBuffer = nullptr;
+static size_t frameSize = 0;
+static size_t imageSendOffset = 0;
+static size_t imageTotalChunks = 0;
+static bool imageSending = false;
+static bool imageBeginSent = false;
+static bool imageEndSent = false;
 
-class ServerCallbacks : public BLEServerCallbacks {
-    void onConnect(BLEServer* server) override {
-        deviceConnected = true;
-        Serial.println("[Comm] BLE client connected");
+// 열화상 전송 버퍼
+static uint8_t* thermalBuffer = nullptr;
+static size_t thermalSize = 0;
+static size_t thermalSendOffset = 0;
+static size_t thermalTotalChunks = 0;
+static bool thermalSending = false;
+static bool thermalBeginSent = false;
+static bool thermalEndSent = false;
+static float thermalMinTemp = 0.0f;
+static float thermalMaxTemp = 0.0f;
+static uint16_t thermalFrameId = 0;
 
-        if (statusChar != nullptr) {
-            statusChar->setValue("READY");
-            statusChar->notify();
-        }
-    }
+static unsigned long lastSendTime = 0;
 
-    void onDisconnect(BLEServer* server) override {
-        deviceConnected = false;
-        Serial.println("[Comm] BLE client disconnected");
+// ===============================
+// BLE 연결/해제 콜백
+// ===============================
+class OwlServerCallbacks : public BLEServerCallbacks {
+public:
+  void onConnect(BLEServer* server) override {
+    deviceConnected = true;
+    Serial.println("[BLE] Client connected");
+  }
 
-        delay(300);
-        BLEDevice::startAdvertising();
-        Serial.println("[Comm] BLE advertising restarted");
-    }
+  void onDisconnect(BLEServer* server) override {
+    deviceConnected = false;
+    Serial.println("[BLE] Client disconnected");
+    BLEDevice::startAdvertising();
+  }
 };
 
-static void notifyText(BLECharacteristic* characteristic, const String& text) {
-    if (!deviceConnected || characteristic == nullptr) {
-        return;
-    }
-
-    characteristic->setValue(text.c_str());
-    characteristic->notify();
-
-    delay(20);
-}
-
-static void notifyBytes(
-    BLECharacteristic* characteristic,
-    const uint8_t* data,
-    size_t length
-) {
-    if (!deviceConnected || characteristic == nullptr || data == nullptr || length == 0) {
-        return;
-    }
-
-    characteristic->setValue((uint8_t*)data, length);
-    characteristic->notify();
-
-    delay(10);
-}
-
-static void sendStatus(const String& status) {
-    notifyText(statusChar, status);
-    Serial.println("[Comm] Status: " + status);
-}
+namespace Comm {
 
 void begin() {
-    Serial.println("[Comm] BLE begin");
+  Serial.println("[Comm] BLE begin");
 
-    BLEDevice::init("OwlGuard");
+  BLEDevice::init("OwlGuard");
+  BLEDevice::setMTU(247);
 
-    bleServer = BLEDevice::createServer();
-    bleServer->setCallbacks(new ServerCallbacks());
+  bleServer = BLEDevice::createServer();
+  bleServer->setCallbacks(new OwlServerCallbacks());
 
-    owlService = bleServer->createService(OWL_SERVICE_UUID);
+  BLEService* service = bleServer->createService(OWL_SERVICE_UUID);
 
-    statusChar = owlService->createCharacteristic(
-        STATUS_CHAR_UUID,
-        BLECharacteristic::PROPERTY_READ |
-        BLECharacteristic::PROPERTY_NOTIFY
-    );
-    statusChar->addDescriptor(new BLE2902());
+  statusChar = service->createCharacteristic(
+    STATUS_CHAR_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  statusChar->addDescriptor(new BLE2902());
+  statusChar->setValue("READY");
 
-    imageMetaChar = owlService->createCharacteristic(
-        IMAGE_META_CHAR_UUID,
-        BLECharacteristic::PROPERTY_NOTIFY
-    );
-    imageMetaChar->addDescriptor(new BLE2902());
+  imageMetaChar = service->createCharacteristic(
+    IMAGE_META_CHAR_UUID,
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+  imageMetaChar->addDescriptor(new BLE2902());
 
-    imageDataChar = owlService->createCharacteristic(
-        IMAGE_DATA_CHAR_UUID,
-        BLECharacteristic::PROPERTY_NOTIFY
-    );
-    imageDataChar->addDescriptor(new BLE2902());
+  imageDataChar = service->createCharacteristic(
+    IMAGE_DATA_CHAR_UUID,
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+  imageDataChar->addDescriptor(new BLE2902());
 
-    thermalMetaChar = owlService->createCharacteristic(
-        THERMAL_META_CHAR_UUID,
-        BLECharacteristic::PROPERTY_NOTIFY
-    );
-    thermalMetaChar->addDescriptor(new BLE2902());
+  thermalMetaChar = service->createCharacteristic(
+    THERMAL_META_CHAR_UUID,
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+  thermalMetaChar->addDescriptor(new BLE2902());
 
-    // 중요:
-    // 이 descriptor가 없으면 앱에서
-    // "CCCD descriptor 없음: 79dc4891-2ce8-4e9a-af50-77550f0f2274"
-    // 로그가 뜨고 열화상 chunk Notify를 못 받음.
-    thermalDataChar = owlService->createCharacteristic(
-        THERMAL_DATA_CHAR_UUID,
-        BLECharacteristic::PROPERTY_NOTIFY
-    );
-    thermalDataChar->addDescriptor(new BLE2902());
+  thermalDataChar = service->createCharacteristic(
+    THERMAL_DATA_CHAR_UUID,
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+  thermalDataChar->addDescriptor(new BLE2902());
 
-    owlService->start();
+  service->start();
 
-    BLEAdvertising* advertising = BLEDevice::getAdvertising();
-    advertising->addServiceUUID(OWL_SERVICE_UUID);
-    advertising->setScanResponse(true);
-    advertising->setMinPreferred(0x06);
-    advertising->setMinPreferred(0x12);
+  BLEAdvertising* advertising = BLEDevice::getAdvertising();
+  advertising->addServiceUUID(OWL_SERVICE_UUID);
+  advertising->setScanResponse(false);
+  advertising->start();
 
-    BLEDevice::startAdvertising();
-
-    Serial.println("[Comm] BLE advertising started");
-}
-
-void handleClient() {
-    // 현재 구조에서는 별도 반복 처리 필요 없음.
-    // main loop에서 기존 코드 호환용으로 호출해도 문제 없음.
+  Serial.println("[Comm] BLE advertising started: OwlGuard");
+  delay(500);
+  Serial.println("[Comm] BLE begin done");
 }
 
 bool isConnected() {
-    return deviceConnected;
+  return deviceConnected;
 }
 
 void setFrame(camera_fb_t* fb) {
-    if (fb == nullptr) {
-        Serial.println("[Comm] camera frame is null");
-        return;
-    }
+  if (fb == nullptr || fb->buf == nullptr || fb->len == 0) {
+    Serial.println("[Comm] setFrame failed: invalid frame");
+    return;
+  }
 
-    if (!deviceConnected) {
-        Serial.println("[Comm] No BLE client connected");
-        return;
-    }
+  if (frameBuffer != nullptr) {
+    free(frameBuffer);
+    frameBuffer = nullptr;
+  }
 
-    if (imageMetaChar == nullptr || imageDataChar == nullptr) {
-        Serial.println("[Comm] image characteristics are null");
-        return;
-    }
+  frameSize = fb->len;
+  frameBuffer = (uint8_t*)malloc(frameSize);
 
-    const uint8_t* imageData = fb->buf;
-    const size_t imageSize = fb->len;
+  if (frameBuffer == nullptr) {
+    Serial.println("[Comm] setFrame failed: malloc failed");
+    esp_camera_fb_return(fb);
+    return;
+  }
 
-    if (imageData == nullptr || imageSize == 0) {
-        Serial.println("[Comm] image data is empty");
-        return;
-    }
+  memcpy(frameBuffer, fb->buf, frameSize);
+  esp_camera_fb_return(fb);
 
-    const size_t totalChunks =
-        (imageSize + IMAGE_CHUNK_SIZE - 1) / IMAGE_CHUNK_SIZE;
+  imageSendOffset = 0;
+  imageTotalChunks = (frameSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
+  imageSending = true;
+  imageBeginSent = false;
+  imageEndSent = false;
+  lastSendTime = 0;
 
-    Serial.printf(
-        "[Comm] JPEG send start: %u bytes, %u chunks\n",
-        (unsigned int)imageSize,
-        (unsigned int)totalChunks
-    );
-
-    sendStatus("IMG_SENDING");
-
-    String beginMeta = "IMG_BEGIN," + String(imageSize) + "," + String(totalChunks);
-    notifyText(imageMetaChar, beginMeta);
-
-    size_t offset = 0;
-    size_t chunkIndex = 0;
-
-    while (offset < imageSize && deviceConnected) {
-        size_t remaining = imageSize - offset;
-        size_t chunkSize = remaining > IMAGE_CHUNK_SIZE
-            ? IMAGE_CHUNK_SIZE
-            : remaining;
-
-        notifyBytes(
-            imageDataChar,
-            imageData + offset,
-            chunkSize
-        );
-
-        offset += chunkSize;
-        chunkIndex++;
-
-        if (chunkIndex % 20 == 0) {
-            Serial.printf(
-                "[Comm] JPEG chunk sent: %u / %u\n",
-                (unsigned int)chunkIndex,
-                (unsigned int)totalChunks
-            );
-        }
-    }
-
-    notifyText(imageMetaChar, "IMG_END");
-    sendStatus("IMG_DONE");
-
-    Serial.println("[Comm] JPEG send done");
+  Serial.print("[Comm] Image frame stored. Size: ");
+  Serial.print(frameSize);
+  Serial.print(" bytes, chunks: ");
+  Serial.println(imageTotalChunks);
 }
 
-void sendThermalFrame(
-    const uint8_t* thermalIndexFrame,
-    size_t dataSize,
-    int frameId,
-    int width,
-    int height,
-    float minTemp,
-    float maxTemp
-) {
-    if (!deviceConnected) {
-        Serial.println("[Comm] No BLE client connected for thermal frame");
-        return;
-    }
+void setThermalFrame(const uint8_t* data, size_t len, float minTemp, float maxTemp) {
+  if (data == nullptr || len == 0) {
+    Serial.println("[Comm] setThermalFrame failed: invalid data");
+    return;
+  }
 
-    if (thermalMetaChar == nullptr || thermalDataChar == nullptr) {
-        Serial.println("[Comm] thermal characteristics are null");
-        return;
-    }
+  if (thermalBuffer != nullptr) {
+    free(thermalBuffer);
+    thermalBuffer = nullptr;
+  }
 
-    if (thermalIndexFrame == nullptr || dataSize == 0) {
-        Serial.println("[Comm] thermal data is empty");
-        return;
-    }
+  thermalBuffer = (uint8_t*)malloc(len);
 
-    const size_t expectedSize = (size_t)width * (size_t)height;
+  if (thermalBuffer == nullptr) {
+    Serial.println("[Comm] setThermalFrame failed: malloc failed");
+    thermalSize = 0;
+    return;
+  }
 
-    if (dataSize < expectedSize) {
-        Serial.printf(
-            "[Comm] thermal data size too small: %u / %u\n",
-            (unsigned int)dataSize,
-            (unsigned int)expectedSize
-        );
-        return;
-    }
+  memcpy(thermalBuffer, data, len);
 
-    const size_t totalChunks =
-        (dataSize + THERMAL_CHUNK_SIZE - 1) / THERMAL_CHUNK_SIZE;
+  thermalSize = len;
+  thermalMinTemp = minTemp;
+  thermalMaxTemp = maxTemp;
 
-    Serial.printf(
-        "[Comm] Thermal send start: frameId=%d, %dx%d, %u bytes, %u chunks, min=%.2f, max=%.2f\n",
-        frameId,
-        width,
-        height,
-        (unsigned int)dataSize,
-        (unsigned int)totalChunks,
-        minTemp,
-        maxTemp
-    );
+  thermalSendOffset = 0;
+  thermalTotalChunks = (thermalSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
+  thermalSending = true;
+  thermalBeginSent = false;
+  thermalEndSent = false;
+  lastSendTime = 0;
 
-    sendStatus("THM_SENDING");
+  Serial.print("[Comm] Thermal frame stored. Size: ");
+  Serial.print(thermalSize);
+  Serial.print(" bytes, chunks: ");
+  Serial.println(thermalTotalChunks);
+}
 
-    String beginMeta =
-        "THM_BEGIN," +
-        String(frameId) + "," +
-        String(width) + "," +
-        String(height) + "," +
-        String(dataSize) + "," +
-        String(totalChunks) + "," +
-        String(minTemp, 1) + "," +
-        String(maxTemp, 1);
+static void handleImageSend() {
+  if (!imageSending || frameBuffer == nullptr || frameSize == 0) {
+    return;
+  }
 
-    notifyText(thermalMetaChar, beginMeta);
+  if (!imageBeginSent) {
+    String meta = "IMG_BEGIN,";
+    meta += String(frameSize);
+    meta += ",";
+    meta += String(imageTotalChunks);
 
-    size_t offset = 0;
-    size_t chunkIndex = 0;
+    imageMetaChar->setValue(meta.c_str());
+    imageMetaChar->notify();
 
-    while (offset < dataSize && deviceConnected) {
-        size_t remaining = dataSize - offset;
-        size_t chunkSize = remaining > THERMAL_CHUNK_SIZE
-            ? THERMAL_CHUNK_SIZE
-            : remaining;
+    statusChar->setValue("IMG_SENDING");
+    statusChar->notify();
 
-        notifyBytes(
-            thermalDataChar,
-            thermalIndexFrame + offset,
-            chunkSize
-        );
+    imageBeginSent = true;
 
-        offset += chunkSize;
-        chunkIndex++;
+    Serial.print("[Comm] ");
+    Serial.println(meta);
+    return;
+  }
 
-        Serial.printf(
-            "[Comm] Thermal chunk sent: %u / %u, size=%u\n",
-            (unsigned int)chunkIndex,
-            (unsigned int)totalChunks,
-            (unsigned int)chunkSize
-        );
-    }
+  if (imageSendOffset < frameSize) {
+    size_t remain = frameSize - imageSendOffset;
+    size_t chunkLen = remain > CHUNK_SIZE ? CHUNK_SIZE : remain;
 
-    String endMeta = "THM_END," + String(frameId);
-    notifyText(thermalMetaChar, endMeta);
+    imageDataChar->setValue(frameBuffer + imageSendOffset, chunkLen);
+    imageDataChar->notify();
 
-    sendStatus("THM_DONE");
+    imageSendOffset += chunkLen;
 
-    Serial.println("[Comm] Thermal send done");
+    Serial.print("[Comm] IMG Sent ");
+    Serial.print(imageSendOffset);
+    Serial.print(" / ");
+    Serial.println(frameSize);
+    return;
+  }
+
+  if (!imageEndSent) {
+    imageMetaChar->setValue("IMG_END");
+    imageMetaChar->notify();
+
+    statusChar->setValue("IMG_DONE");
+    statusChar->notify();
+
+    imageEndSent = true;
+    Serial.println("[Comm] IMG_END");
+    return;
+  }
+
+  free(frameBuffer);
+  frameBuffer = nullptr;
+  frameSize = 0;
+  imageSendOffset = 0;
+  imageTotalChunks = 0;
+  imageSending = false;
+  imageBeginSent = false;
+  imageEndSent = false;
+
+  Serial.println("[Comm] Image transfer complete");
+}
+
+static void handleThermalSend() {
+  if (!thermalSending || thermalBuffer == nullptr || thermalSize == 0) {
+    return;
+  }
+
+  if (!thermalBeginSent) {
+    String meta = "THM_BEGIN,";
+    meta += String(thermalFrameId);
+    meta += ",";
+    meta += String(32);
+    meta += ",";
+    meta += String(24);
+    meta += ",";
+    meta += String(thermalSize);
+    meta += ",";
+    meta += String(thermalTotalChunks);
+    meta += ",";
+    meta += String(thermalMinTemp, 1);
+    meta += ",";
+    meta += String(thermalMaxTemp, 1);
+
+    thermalMetaChar->setValue(meta.c_str());
+    thermalMetaChar->notify();
+
+    statusChar->setValue("THM_SENDING");
+    statusChar->notify();
+
+    thermalBeginSent = true;
+
+    Serial.print("[Comm] ");
+    Serial.println(meta);
+    return;
+  }
+
+  if (thermalSendOffset < thermalSize) {
+    size_t remain = thermalSize - thermalSendOffset;
+    size_t chunkLen = remain > CHUNK_SIZE ? CHUNK_SIZE : remain;
+
+    thermalDataChar->setValue(thermalBuffer + thermalSendOffset, chunkLen);
+    thermalDataChar->notify();
+
+    thermalSendOffset += chunkLen;
+
+    Serial.print("[Comm] THM Sent ");
+    Serial.print(thermalSendOffset);
+    Serial.print(" / ");
+    Serial.println(thermalSize);
+    return;
+  }
+
+  if (!thermalEndSent) {
+    String endMsg = "THM_END,";
+    endMsg += String(thermalFrameId);
+
+    thermalMetaChar->setValue(endMsg.c_str());
+    thermalMetaChar->notify();
+
+    statusChar->setValue("THM_DONE");
+    statusChar->notify();
+
+    thermalEndSent = true;
+    Serial.println("[Comm] THM_END");
+    return;
+  }
+
+  free(thermalBuffer);
+  thermalBuffer = nullptr;
+  thermalSize = 0;
+  thermalSendOffset = 0;
+  thermalTotalChunks = 0;
+  thermalSending = false;
+  thermalBeginSent = false;
+  thermalEndSent = false;
+  thermalFrameId++;
+
+  Serial.println("[Comm] Thermal transfer complete");
+}
+
+void handleClient() {
+  if (!deviceConnected) {
+    return;
+  }
+
+  unsigned long now = millis();
+
+  if (now - lastSendTime < SEND_INTERVAL_MS) {
+    return;
+  }
+
+  lastSendTime = now;
+
+  // 이미지 전송이 있으면 먼저 전송하고, 그다음 열화상 전송
+  if (imageSending) {
+    handleImageSend();
+    return;
+  }
+
+  if (thermalSending) {
+    handleThermalSend();
+    return;
+  }
+
+  statusChar->setValue("READY");
 }
 
 }
