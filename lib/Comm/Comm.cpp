@@ -52,6 +52,7 @@ static uint8_t* thermalBuffer = nullptr;
 static size_t thermalSize = 0;
 static size_t thermalSendOffset = 0;
 static size_t thermalTotalChunks = 0;
+static size_t thermalChunkIndex = 0;
 static bool thermalSending = false;
 static bool thermalBeginSent = false;
 static bool thermalEndSent = false;
@@ -126,7 +127,7 @@ void begin() {
 
   BLEAdvertising* advertising = BLEDevice::getAdvertising();
   advertising->addServiceUUID(OWL_SERVICE_UUID);
-  advertising->setScanResponse(false);
+  advertising->setScanResponse(true);
   advertising->start();
 
   Serial.println("[Comm] BLE advertising started: OwlGuard");
@@ -201,6 +202,7 @@ void setThermalFrame(const uint8_t* data, size_t len, float minTemp, float maxTe
 
   thermalSendOffset = 0;
   thermalTotalChunks = (thermalSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
+  thermalChunkIndex = 0;
   thermalSending = true;
   thermalBeginSent = false;
   thermalEndSent = false;
@@ -311,20 +313,52 @@ static void handleThermalSend() {
   }
 
   if (thermalSendOffset < thermalSize) {
-    size_t remain = thermalSize - thermalSendOffset;
-    size_t chunkLen = remain > CHUNK_SIZE ? CHUNK_SIZE : remain;
+  size_t remain = thermalSize - thermalSendOffset;
+  size_t chunkLen = remain > CHUNK_SIZE ? CHUNK_SIZE : remain;
 
-    thermalDataChar->setValue(thermalBuffer + thermalSendOffset, chunkLen);
-    thermalDataChar->notify();
+  /*
+    Thermal data packet 구조:
 
-    thermalSendOffset += chunkLen;
+    [0] frameId low byte
+    [1] frameId high byte
+    [2] chunkId
+    [3] totalChunks
+    [4] payloadLen
+    [5...] thermal index payload
 
-    Serial.print("[Comm] THM Sent ");
-    Serial.print(thermalSendOffset);
-    Serial.print(" / ");
-    Serial.println(thermalSize);
-    return;
-  }
+    payload는 0~255로 변환된 MLX90640 데이터
+  */
+
+  uint8_t packet[5 + CHUNK_SIZE];
+
+  packet[0] = lowByte(thermalFrameId);
+  packet[1] = highByte(thermalFrameId);
+  packet[2] = (uint8_t)thermalChunkIndex;
+  packet[3] = (uint8_t)thermalTotalChunks;
+  packet[4] = (uint8_t)chunkLen;
+
+  memcpy(&packet[5], thermalBuffer + thermalSendOffset, chunkLen);
+
+  thermalDataChar->setValue(packet, 5 + chunkLen);
+  thermalDataChar->notify();
+
+  thermalSendOffset += chunkLen;
+
+  Serial.print("[Comm] THM Sent frameId=");
+  Serial.print(thermalFrameId);
+  Serial.print(" chunk=");
+  Serial.print(thermalChunkIndex);
+  Serial.print("/");
+  Serial.print(thermalTotalChunks);
+  Serial.print(" bytes=");
+  Serial.print(thermalSendOffset);
+  Serial.print("/");
+  Serial.println(thermalSize);
+
+  thermalChunkIndex++;
+
+  return;
+}
 
   if (!thermalEndSent) {
     String endMsg = "THM_END,";
@@ -346,6 +380,7 @@ static void handleThermalSend() {
   thermalSize = 0;
   thermalSendOffset = 0;
   thermalTotalChunks = 0;
+  thermalChunkIndex = 0;
   thermalSending = false;
   thermalBeginSent = false;
   thermalEndSent = false;
