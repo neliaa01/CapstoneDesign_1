@@ -38,12 +38,77 @@
 #define THERMAL_PIXELS  (THERMAL_WIDTH * THERMAL_HEIGHT)
 
 static Adafruit_MLX90640 mlx;
+static bool cameraReady = false;
 static bool thermalReady = false;
 static bool firstRange = true;
 
 static float thermalFrame[THERMAL_PIXELS];
 static float displayMinTemp = 20.0f;
 static float displayMaxTemp = 35.0f;
+
+static void printMemoryStatus(const char* label) {
+  Serial.print("[Sensors] ");
+  Serial.print(label);
+  Serial.print(" free heap=");
+  Serial.print(ESP.getFreeHeap());
+  Serial.print(", free PSRAM=");
+  Serial.println(ESP.getFreePsram());
+}
+
+static camera_config_t makeCameraConfig() {
+  camera_config_t config = {};
+
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+
+  config.xclk_freq_hz = 10000000;
+  config.frame_size = FRAMESIZE_QVGA;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.jpeg_quality = 12;
+  config.fb_count = 1;
+
+  return config;
+}
+
+static bool beginCameraOnly() {
+  Serial.println("[Sensors] Camera init start");
+
+  camera_config_t config = makeCameraConfig();
+  esp_err_t err = esp_camera_init(&config);
+
+  if (err != ESP_OK) {
+    cameraReady = false;
+    Serial.print("[Sensors] Camera init failed: 0x");
+    Serial.println(err, HEX);
+    return false;
+  }
+
+  cameraReady = true;
+  Serial.println("[Sensors] Camera init success");
+  return true;
+}
 
 static uint8_t tempToIndex(float temp, float tMin, float tMax) {
   if (tMax <= tMin) return 0;
@@ -92,52 +157,35 @@ static void updateAutoRange(const float* frame, float& outMin, float& outMax) {
 }
 
 void Sensors::begin() {
-  Serial.println("[Sensors] Camera init start");
+  beginCameraOnly();
+  beginThermal();
+}
 
-  camera_config_t config = {};
+bool Sensors::restartCamera() {
+  Serial.println("[Sensors] Camera restart start");
+  printMemoryStatus("before restart");
 
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
-
-  config.pin_sccb_sda = SIOD_GPIO_NUM;
-  config.pin_sccb_scl = SIOC_GPIO_NUM;
-
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
-
-  config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_QVGA;
-  config.pixel_format = PIXFORMAT_JPEG;
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-  config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 12;
-  config.fb_count = 1;
-
-  esp_err_t err = esp_camera_init(&config);
-
-  if (err != ESP_OK) {
-    Serial.print("[Sensors] Camera init failed: 0x");
-    Serial.println(err, HEX);
-    return;
+  if (cameraReady) {
+    esp_err_t err = esp_camera_deinit();
+    if (err != ESP_OK) {
+      Serial.print("[Sensors] Camera deinit warning: 0x");
+      Serial.println(err, HEX);
+    }
+    cameraReady = false;
+    delay(300);
   }
 
-  Serial.println("[Sensors] Camera init success");
+  bool ok = beginCameraOnly();
+  delay(300);
+  printMemoryStatus("after restart");
 
-  beginThermal();
+  if (ok) {
+    Serial.println("[Sensors] Camera restart success");
+  } else {
+    Serial.println("[Sensors] Camera restart failed");
+  }
+
+  return ok;
 }
 
 bool Sensors::beginThermal() {
@@ -164,11 +212,28 @@ bool Sensors::beginThermal() {
 }
 
 camera_fb_t* Sensors::captureImage() {
+  if (!cameraReady) {
+    Serial.println("[Sensors] Camera is not ready, restarting");
+    if (!restartCamera()) {
+      return nullptr;
+    }
+  }
+
   camera_fb_t* fb = esp_camera_fb_get();
 
   if (fb == nullptr) {
-    Serial.println("[Sensors] Camera capture failed");
-    return nullptr;
+    Serial.println("[Sensors] Camera capture failed, restarting camera");
+    if (!restartCamera()) {
+      return nullptr;
+    }
+
+    Serial.println("[Sensors] Retrying camera capture");
+    fb = esp_camera_fb_get();
+
+    if (fb == nullptr) {
+      Serial.println("[Sensors] Camera capture failed after restart");
+      return nullptr;
+    }
   }
 
   Serial.print("[Sensors] Camera capture success, size: ");

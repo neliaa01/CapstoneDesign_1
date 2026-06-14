@@ -23,7 +23,7 @@
 #define THERMAL_DATA_CHAR_UUID  "79dc4891-2ce8-4e9a-af50-77550f0f2274"
 
 static const size_t CHUNK_SIZE = 180;
-static const unsigned long SEND_INTERVAL_MS = 10;
+static const unsigned long SEND_INTERVAL_MS = 20;
 
 // BLE 객체
 static BLEServer* bleServer = nullptr;
@@ -85,7 +85,7 @@ void begin() {
   Serial.println("[Comm] BLE begin");
 
   BLEDevice::init("OwlGuard");
-  BLEDevice::setMTU(247);
+  BLEDevice::setMTU(200);
 
   bleServer = BLEDevice::createServer();
   bleServer->setCallbacks(new OwlServerCallbacks());

@@ -2,6 +2,7 @@
 #include "Sensors.h"
 #include "LED.h"
 #include "Comm.h"
+#include "AI.h"
 
 // ===============================
 // 핀 설정
@@ -29,24 +30,25 @@ void captureAndSend();
 
 void setup() {
   Serial.begin(115200);
-  delay(3000);
+  delay(7000);
 
+  
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_IR_LED, OUTPUT);
-  digitalWrite(PIN_IR_LED, LOW);
+  digitalWrite(PIN_IR_LED, HIGH);
 
   Serial.println();
   Serial.println("=================================");
   Serial.println("[MAIN] OwlGuard setup start");
   Serial.println("=================================");
 
-  Serial.println("[MAIN] BLE start");
-  Comm::begin();
-  Serial.println("[MAIN] BLE done");
-
   Serial.println("[MAIN] Sensors start");
   Sensors::begin();
   Serial.println("[MAIN] Sensors done");
+
+  Serial.println("[MAIN] BLE start");
+  Comm::begin();
+  Serial.println("[MAIN] BLE done");
 
   Serial.println("[MAIN] LED start");
   LED::begin();
@@ -55,10 +57,17 @@ void setup() {
 
   Serial.println("[MAIN] Setup done");
   Serial.println("[MAIN] Press button to capture image + thermal frame");
+
+  if (psramFound()) {
+    Serial.println("[MAIN] PSRAM is OK! Camera will be happy.");
+  } else {
+    Serial.println("[MAIN] ERROR: PSRAM is DEAD! Check platformio.ini.");
+  }
 }
 
 void loop() {
   currentButtonState = digitalRead(PIN_BUTTON);
+  digitalWrite(PIN_IR_LED, HIGH);
 
   // 버튼은 INPUT_PULLUP 기준
   // 평소 HIGH, 누르면 LOW
@@ -95,14 +104,13 @@ void captureAndSend() {
   // 1. 일반 카메라 촬영
   // ===============================
   Serial.println("[CAPTURE] IR LED ON");
-  digitalWrite(PIN_IR_LED, HIGH);
-  delay(200);
+
+  delay(500);
 
   Serial.println("[CAPTURE] Taking camera image...");
   camera_fb_t* frame = Sensors::captureImage();
 
-  digitalWrite(PIN_IR_LED, LOW);
-  Serial.println("[CAPTURE] IR LED OFF");
+  delay(1000);
 
   if (frame == nullptr) {
     Serial.println("[CAPTURE] Failed: camera frame is NULL");
